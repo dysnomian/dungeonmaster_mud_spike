@@ -1,0 +1,5 @@
+.envrc
+__pycache__/
+nats.log
+speech.mp3
+.DS_Store
