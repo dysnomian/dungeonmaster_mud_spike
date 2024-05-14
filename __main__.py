@@ -1,174 +1,134 @@
-import os
-from pathlib import Path
-import json
-from typing import NamedTuple
-
-from openai import OpenAI
-import subprocess
-
-
-client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
-
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-SPEAK_TO_ME = True
-
-
-def speak_text(text: str):
-    with openai_client.audio.speech.with_streaming_response.create(
-        model="tts-1",
-        voice="alloy",
-        input=text,
-    ) as response:
-        file_path = Path("speech.mp3")
-        response.stream_to_file(file_path)
-        subprocess.run(["afplay", file_path])
-
-
-actions = {
-    "look": "Describe the room. Mention obvious exits, items, creatures, and features.",
-    "go": "Move the player to a different room. Describe the new room.",
-    "take": "Pick up an item in the room.",
-    "use": "Use an item in the room.",
-    "inventory": "List the items the player has.",
-}
-
-initial_scene = """
-You are in a torch-lit room. There is a locked door with metal bars in front of you. Behind you is another door.
-
-Obvious exits:
-- North: Door with metal bars
-- South: Door
-
-What do you do?
-
+"""
+The spike! The goal here is just to have a playable game to figure out what needs to go into the bigger game and how the pieces fit together.
 """
 
+from typing import List, Dict
 
-def prompt(prompt_text):
-    system_prompt = """
-    You are a narrator for an old-school text-based adventure game. You will be given a scene and a user action. Evaluate whether they can take the action, and describe the next scene.
+from lib.logger import logger
+from lib.agent import Agent
+from lib.config import GAME_CONFIG
+from lib.game_state import GameState
+from scene_describer_agent import SceneDescriberAgent
 
-    Respond with a JSON object containing the following keys:
-    - 'scene': a string describing the new scene. This will be visible to the user at the start of the next turn. Omitting this key means the scene remains unchanged.
-    - 'inventory': (optional) A list of strings representing items the player has picked up. Omitting this key means the player's inventory remains unchanged. This will replace their existing inventory, so don't forget to include items they already had.
-    Don't forget to escape line breaks and special characters in your JSON string.
-    """
 
-    response = client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt_text},
-        ],
-        model="lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF",
-        temperature=0.2,
-        max_tokens=500,
-        top_p=1,
-        frequency_penalty=0,
-        presence_penalty=0,
-        response_format={"type": "json"},
+def action__debug_state(
+    action_params: List[str], agent: Agent, state: GameState
+) -> GameState:
+    logger.info(f"Interpreted user action: {action_params}")
+    logger.info(state)
+    state.dont_describe_scene()
+    return state
+
+
+def action__inventory(
+    action_params: List[str], agent: Agent, state: GameState
+) -> GameState:
+    logger.info(f"Interpreted user action: {action_params}")
+    state.print_inventory()
+    state.dont_describe_scene()
+    return state
+
+
+def action__look(action_params: List[str], agent: Agent, state: GameState) -> GameState:
+    logger.info(f"Interpreted user action: {action_params}")
+    return agent.prompt(
+        {
+            "user_action": action_params,
+            "current_scene": state.current_scene.to_dict(),
+            "task": "Create or update the scene's long_description with additional details relevant to the current situation.",
+        },
+        state,
     )
-    if response.choices[0].message.content:
-        return handle_llm_response(response)
-    return "No description generated."
 
 
-game_state = {
-    "current_scene": initial_scene,
-    "player": {
-        "name": "Tara",
-        "health": 100,
-        "inventory": [],
-    },
-    "engine": {
-        "describe_current_scene": True,
-        "last_action": None,
-    },
-}
+def handle_user_action(user_action: str, state: GameState, agents: Dict[str, Agent]):
+    "Handle the user's action, updating the game state accordingly."
+    ### big ol case statement
+    logger.info("User action string: %s", user_action)
+    action_params = user_action.split(" ", 1)
+    match action_params:
+        # case ["debug", "state"]:
+        #     return action__debug_state(action_params, narrator, state)
+        # case ["inventory"]:
+        #     return action__inventory(action_params, narrator, state)
+        case ["look"]:
+            return action__look(action_params, agents["scene_describer"], state)
+        # case ["look", *rest]:
+        #     logger.info("Interpreted user action: ['look', %s] (%s)", rest, user_action)
+        #     updated_state = narrator.prompt(
+        #         {
+        #             "user_action": user_action,
+        #             "task": "Use 'feedback' to describe the thing the user is looking at. Update the relevant description fields for the item, scene, or other if applicable.",
+        #         },
+        #         State,
+        #     )
+        #     game_state = updated_state
+        #     return
+        # case ["go", *rest]:
+        #     updated_state = narrator.prompt(
+        #         {
+        #             "user_action": user_action,
+        #             "task": "Evaluate whether it is possible or reasonable for the player to go in the direction they've specified. If it is, generate a new scene based on the user's chosen direction with a new id. Ensure that the route to the previous scene is included in the new scene's exits.",
+        #         },
+        #         State,
+        #     )
+        #     game_state = updated_state
+        #     return
+        # case ["use", *rest]:
+        #     updated_state = narrator.prompt(
+        #         {
+        #             "user_action": user_action,
+        #             "task": "Evaluate whether it is possible or reasonable for the player to use the item they've specified. If it is a physical object, ensure it is in their inventory or in the scene. Determine whether their attempt to use it is successful, and describe new scene.",
+        #         },
+        #         State,
+        #     )
+        #     game_state = updated_state
+        #     return
+        case _:
+            return agents["scene_describer"].prompt(
+                {
+                    "user_action": user_action,
+                    "task": "Evaluate the user's desired action and respond accordingly. Describe the new scene.",
+                },
+                State,
+            )
 
 
-def handle_llm_response(response):
-    try:
-        content = json.loads(response.choices[0].message.content)
+def game_loop(state, agents) -> GameState:
+    state.increment_turn_count()
+    state.display_any_feedback()
+    state.describe_current_scene()
 
-        if "scene" in content:
-            game_state["current_scene"] = content["scene"]
-        if "inventory" in content:
-            game_state["player"]["inventory"] = content["inventory"]
-    except json.JSONDecodeError:
-        prompt(
-            "Sorry, that JSON didn't parse correctly. Please try again. Here's what I received: "
-            + response.choices[0].message.content
-        )
+    user_action = input("> ")
 
+    print("\n\n")
 
-def game_loop():
-    while True:
+    if user_action == "quit":
+        print("Goodbye!")
+        exit(0)
 
-        if game_state["engine"]["describe_current_scene"]:
-            print(game_state.get("current_scene"))
+    state = handle_user_action(user_action, state, agents)
 
-        game_state["engine"]["describe_current_scene"] = True
-
-        user_action = input("> ")
-
-        if SPEAK_TO_ME:
-            speak_text(str(game_state.get("current_scene")))
-
-        print("\n\n")
-
-        ### big ol case statement
-        match user_action.split(" ", 1):
-            case ["debug", "state"]:
-                print(json.dumps(game_state, indent=4))
-                game_state["engine"]["describe_current_scene"] = False
-                continue
-            case ["quit"]:
-                print("Goodbye!")
-                break
-            case ["help"]:
-                print("Actions:")
-                for action, description in actions.items():
-                    print(f"{action}: {description}")
-                game_state["engine"]["describe_current_scene"] = False
-                continue
-            case ["inventory"]:
-                if game_state["player"]["inventory"]:
-                    print("Inventory:")
-                    for item in game_state["player"]["inventory"]:
-                        print(f"- {item}")
-                else:
-                    print("You have no items in your inventory.")
-                game_state["engine"]["describe_current_scene"] = False
-                continue
-            case ["look"]:
-                prompt(
-                    f"The player is in this scene: '{game_state["current_scene"]}'. They want to take this action: '{user_action}' They have the following items: {game_state["player"]["inventory"]} Please describe the current scene in more detail scene for the user."
-                )
-                continue
-            case ["look", *rest]:
-                prompt(
-                    f"The player is in this scene: '{game_state["current_scene"]}'. They want to take this action: '{user_action}' They have the following items: {game_state['player']['inventory']} Please describe current in more detail scene for the user."
-                )
-                continue
-            case ["go", *rest]:
-                prompt(
-                    f"The player is in this scene: '{game_state["current_scene"]}'. They want to take this action: '{user_action}' They have the following items: {game_state['player']['inventory']} Please describe the new scene for the user."
-                )
-                continue
-            case ["use", *rest]:
-                prompt(
-                    f"The player is in this scene: '{game_state["current_scene"]}'. They want to take use this: {rest} They have the following items: {game_state['player']['inventory']} Evaluate whether using that is possible or reasonable given the circumstances, and if so, describe what happens when they attempt it."
-                )
-                continue
-            case [_, *rest]:
-                prompt(
-                    f"The player is in this scene: '{game_state["current_scene"]}'. They want to take this action: '{user_action}' They have the following items: {game_state['player']['inventory']} Evaluate the action they want to do to decide if it's possible or reasonable given the circumstances, and if so, describe what happens when they attempt it. Please describe the new scene for the user."
-                )
-                continue
-
-        game_state["engine"]["last_action"] = user_action
+    return state
 
 
 if __name__ == "__main__":
-    game_loop()
+    State = GameState.from_dict(
+        {
+            "current_scene": GAME_CONFIG["initial_scene"],
+            "inventory": GAME_CONFIG.get("inventory"),
+            "player": GAME_CONFIG.get("player"),
+            "engine": {"describe_current_scene": True, "turn_count": 0},
+            "environment": GAME_CONFIG.get("environment"),
+        }
+    )
+
+    logger.info("Initial game state: %s", State.to_dict())
+
+    agents_list = {
+        "narrator": Agent("narrator"),
+        "scene_describer": SceneDescriberAgent(),
+    }
+
+    while True:
+        State = game_loop(State, agents_list)
