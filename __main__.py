@@ -77,7 +77,7 @@ def game_loop(state: GameState):
         if state.engine["describe_current_scene"]:
             print(format_readable_scene(state.current_scene, state))
 
-        # Turn describe_current_scene back on
+        # Turn describe_current_scene back on and delete the feedback from the previous turn
         state = GameState(
             current_scene=state.current_scene,
             inventory=state.inventory,
@@ -86,7 +86,7 @@ def game_loop(state: GameState):
                 "last_action": state.engine["last_action"],
             },
             story=state.story,
-            feedback=state.feedback,
+            feedback="",
         )
 
         user_action = input("> ")
