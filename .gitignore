@@ -3,3 +3,4 @@ __pycache__/
 nats.log
 speech.mp3
 .DS_Store
+content_modules/*

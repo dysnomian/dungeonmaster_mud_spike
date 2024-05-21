@@ -1,7 +1,8 @@
 import os
-import json
 from pathlib import Path
+from xml.etree.ElementInclude import include
 
+import openai
 from referencing import Registry, Resource
 from referencing.exceptions import NoSuchResource
 
@@ -17,29 +18,45 @@ GAME_CONFIG = yaml.safe_load(open(f"{MODULE_DIR}/config.yml", "r", encoding="utf
 SCHEMAS_DIR = MODULE_DIR / "schemas"
 
 
-def retrieve_schema_from_filesystem(uri: str):
-    if not uri.startswith("urn:"):
-        print("Error: URI does not start with urn: %s", uri)
-        raise NoSuchResource(ref=uri)
-    path = SCHEMAS_DIR / Path(uri.removeprefix("urn:"))
-    contents = json.loads(path.read_text())
-    return Resource.from_contents(contents)
-
-
-registry = Registry(retrieve=retrieve_schema_from_filesystem)
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 LLM_BASE_URL = "http://localhost:1234/v1"  # for LM Studio
 API_KEY = "lm-studio"
 
 SPEAK_TO_ME = True if os.getenv("SPEAK_TO_ME") == "true" else False
 
-client = OpenAI(base_url=LLM_BASE_URL, api_key=API_KEY)
+local_client = OpenAI(base_url=LLM_BASE_URL, api_key=API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-print(
-    "Game configuration:\nOpenAI API Key: %s\nBase URL: %s\nAPI Key: %s",
-    OPENAI_API_KEY,
-    LLM_BASE_URL,
-    API_KEY,
-)
+def client(llm_config: dict = {}) -> OpenAI:
+    openai_models = ["gpt-3.5-turbo", "gpt-4-turbo", "gpt-4", "gpt-4o"]
+
+    if llm_config.get("model") in openai_models:
+        return openai_client
+    return local_client
+
+
+def llm_config_for(agent_name: str) -> dict:
+    default_config = {
+        "model": "lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF",
+        "temperature": 0.1,
+        "max_tokens": 500,
+        "top_p": 1,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
+    }
+
+    llm_config = GAME_CONFIG["agents"][agent_name]
+
+    return {
+        "model": llm_config.get("model", default_config["model"]),
+        "temperature": llm_config.get("temperature", default_config["temperature"]),
+        "max_tokens": llm_config.get("max_tokens", default_config["max_tokens"]),
+        "top_p": llm_config.get("top_p", default_config["top_p"]),
+        "frequency_penalty": llm_config.get(
+            "frequency_penalty", default_config["frequency_penalty"]
+        ),
+        "presence_penalty": llm_config.get(
+            "presence_penalty", default_config["presence_penalty"]
+        ),
+    }

@@ -1,174 +1,112 @@
-import os
-from pathlib import Path
-import json
-from typing import NamedTuple
+from typing import Dict, Any
+from yaspin import yaspin
 
-from openai import OpenAI
-import subprocess
-
-
-client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
-
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-SPEAK_TO_ME = True
+from lib.config import GAME_CONFIG, SCHEMAS_DIR
+from lib.logger import logger
+from lib.color import color
+from lib.game_state import GameState, State
+from lib.narrator_agent import Narrator
 
 
-def speak_text(text: str):
-    with openai_client.audio.speech.with_streaming_response.create(
-        model="tts-1",
-        voice="alloy",
-        input=text,
-    ) as response:
-        file_path = Path("speech.mp3")
-        response.stream_to_file(file_path)
-        subprocess.run(["afplay", file_path])
+def format_readable_scene(scene: Dict[str, Any]) -> str:
+    "Print the scene JSON in a human-readable format."
+    scene_description = ""
 
+    if "feedback" in scene:
+        scene_description = scene_description + scene["feedback"] + "\n\n"
 
-actions = {
-    "look": "Describe the room. Mention obvious exits, items, creatures, and features.",
-    "go": "Move the player to a different room. Describe the new room.",
-    "take": "Pick up an item in the room.",
-    "use": "Use an item in the room.",
-    "inventory": "List the items the player has.",
-}
-
-initial_scene = """
-You are in a torch-lit room. There is a locked door with metal bars in front of you. Behind you is another door.
-
-Obvious exits:
-- North: Door with metal bars
-- South: Door
-
-What do you do?
-
-"""
-
-
-def prompt(prompt_text):
-    system_prompt = """
-    You are a narrator for an old-school text-based adventure game. You will be given a scene and a user action. Evaluate whether they can take the action, and describe the next scene.
-
-    Respond with a JSON object containing the following keys:
-    - 'scene': a string describing the new scene. This will be visible to the user at the start of the next turn. Omitting this key means the scene remains unchanged.
-    - 'inventory': (optional) A list of strings representing items the player has picked up. Omitting this key means the player's inventory remains unchanged. This will replace their existing inventory, so don't forget to include items they already had.
-    Don't forget to escape line breaks and special characters in your JSON string.
-    """
-
-    response = client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt_text},
-        ],
-        model="lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF",
-        temperature=0.2,
-        max_tokens=500,
-        top_p=1,
-        frequency_penalty=0,
-        presence_penalty=0,
-        response_format={"type": "json"},
-    )
-    if response.choices[0].message.content:
-        return handle_llm_response(response)
-    return "No description generated."
-
-
-game_state = {
-    "current_scene": initial_scene,
-    "player": {
-        "name": "Tara",
-        "health": 100,
-        "inventory": [],
-    },
-    "engine": {
-        "describe_current_scene": True,
-        "last_action": None,
-    },
-}
-
-
-def handle_llm_response(response):
-    try:
-        content = json.loads(response.choices[0].message.content)
-
-        if "scene" in content:
-            game_state["current_scene"] = content["scene"]
-        if "inventory" in content:
-            game_state["player"]["inventory"] = content["inventory"]
-    except json.JSONDecodeError:
-        prompt(
-            "Sorry, that JSON didn't parse correctly. Please try again. Here's what I received: "
-            + response.choices[0].message.content
+    if "title" in scene:
+        scene_description = (
+            scene_description
+            + color.bold
+            + color.underline
+            + scene["title"]
+            + color.end
+            + "\n"
         )
 
+    scene_description += scene["description"]
 
-def game_loop():
+    if "exits" in scene:
+        scene_description += "\n\n" + color.underline + "Exits:" + color.end + "\n"
+        for exit_data in scene["exits"]:
+            if "hidden" in exit_data:
+                continue
+            scene_description += (
+                f"- {exit_data['direction'].capitalize()}: {exit_data['description']}\n"
+            )
+
+    scene_description += "\nWhat do you do?\n"
+
+    return scene_description
+
+
+def dispatch_user_action(user_action: str, state: GameState) -> GameState:
+    match user_action.split(" ", 1):
+        case ["quit"]:
+            print("Goodbye!")
+            exit(0)
+        case ["inventory"]:
+            if state.inventory:
+                print("Inventory:")
+                for item in state.inventory:
+                    print(f"- {item}")
+            else:
+                print("You have no items in your inventory.")
+            return state
+        case ["look"]:
+            return state
+        case ["look", *rest]:
+            with yaspin(text="Interpreting command...", color="cyan"):
+                return Narrator().look_at(" ".join(rest), state)
+        case ["go", *rest]:
+            with yaspin(text="Generating...", color="cyan"):
+                state = Narrator().go(user_action, state)
+            return state
+        case ["use", *rest]:
+            with yaspin(text="Generating...", color="cyan"):
+                state = Narrator().use(user_action, state)
+            return state
+        case [_, *rest]:
+            print("Oops! I don't understand that command.")
+            return state
+
+
+def game_loop(state: GameState):
     while True:
 
-        if game_state["engine"]["describe_current_scene"]:
-            print(game_state.get("current_scene"))
+        # Show the current scene by default at the top of the loop, unless we set engine.describe_current_scene to False
+        if state.engine["describe_current_scene"]:
+            print(format_readable_scene(state.current_scene))
 
-        game_state["engine"]["describe_current_scene"] = True
+        state = GameState(
+            current_scene=state.current_scene,
+            inventory=state.inventory,
+            engine={
+                "describe_current_scene": True,
+                "last_action": state.engine["last_action"],
+            },
+            story=state.story,
+            feedback="",
+        )
 
         user_action = input("> ")
 
-        if SPEAK_TO_ME:
-            speak_text(str(game_state.get("current_scene")))
+        state = dispatch_user_action(user_action, state)
 
-        print("\n\n")
+        logger.info("State: %s", state)
 
-        ### big ol case statement
-        match user_action.split(" ", 1):
-            case ["debug", "state"]:
-                print(json.dumps(game_state, indent=4))
-                game_state["engine"]["describe_current_scene"] = False
-                continue
-            case ["quit"]:
-                print("Goodbye!")
-                break
-            case ["help"]:
-                print("Actions:")
-                for action, description in actions.items():
-                    print(f"{action}: {description}")
-                game_state["engine"]["describe_current_scene"] = False
-                continue
-            case ["inventory"]:
-                if game_state["player"]["inventory"]:
-                    print("Inventory:")
-                    for item in game_state["player"]["inventory"]:
-                        print(f"- {item}")
-                else:
-                    print("You have no items in your inventory.")
-                game_state["engine"]["describe_current_scene"] = False
-                continue
-            case ["look"]:
-                prompt(
-                    f"The player is in this scene: '{game_state["current_scene"]}'. They want to take this action: '{user_action}' They have the following items: {game_state["player"]["inventory"]} Please describe the current scene in more detail scene for the user."
-                )
-                continue
-            case ["look", *rest]:
-                prompt(
-                    f"The player is in this scene: '{game_state["current_scene"]}'. They want to take this action: '{user_action}' They have the following items: {game_state['player']['inventory']} Please describe current in more detail scene for the user."
-                )
-                continue
-            case ["go", *rest]:
-                prompt(
-                    f"The player is in this scene: '{game_state["current_scene"]}'. They want to take this action: '{user_action}' They have the following items: {game_state['player']['inventory']} Please describe the new scene for the user."
-                )
-                continue
-            case ["use", *rest]:
-                prompt(
-                    f"The player is in this scene: '{game_state["current_scene"]}'. They want to take use this: {rest} They have the following items: {game_state['player']['inventory']} Evaluate whether using that is possible or reasonable given the circumstances, and if so, describe what happens when they attempt it."
-                )
-                continue
-            case [_, *rest]:
-                prompt(
-                    f"The player is in this scene: '{game_state["current_scene"]}'. They want to take this action: '{user_action}' They have the following items: {game_state['player']['inventory']} Evaluate the action they want to do to decide if it's possible or reasonable given the circumstances, and if so, describe what happens when they attempt it. Please describe the new scene for the user."
-                )
-                continue
-
-        game_state["engine"]["last_action"] = user_action
+        state = GameState(
+            current_scene=state.current_scene,
+            inventory=state.inventory,
+            engine={
+                "describe_current_scene": state.engine["describe_current_scene"],
+                "last_action": user_action,
+            },
+            story=state.story,
+            feedback="",
+        )
 
 
 if __name__ == "__main__":
-    game_loop()
+    game_loop(State)
